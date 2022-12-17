@@ -11,7 +11,6 @@ use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_derive(Wamp)]
 pub fn derive_decode_fn(input: TokenStream) -> TokenStream {
-    // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(input as DeriveInput);
 
     let ident = input.ident;
@@ -29,15 +28,17 @@ pub fn derive_decode_fn(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl From<Arc< #ident >> for WampData {
+        /*
+        impl From<Arc< #ident >> for swampyer::WampData {
             fn from(d:Arc< #ident >) -> Self {
-                WampData::Serializable(d)
+                swampyer::WampData::Serializable(d)
             }
         }
+        */
 
-        impl From< #ident > for WampData {
+        impl From< #ident > for swampyer::WampData {
             fn from(d: #ident ) -> Self {
-                WampData::Serializable(Arc::new(d))
+                swampyer::WampData::Serializable(Arc::new(d))
             }
         }
     };

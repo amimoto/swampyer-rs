@@ -5,8 +5,11 @@ use derive_builder::Builder;
 pub use minicbor::{Decoder, Encoder, encode, data::Type};
 pub use minicbor_derive::{Encode, Decode};
 use std::collections::HashMap;
-pub use std::sync::Arc;
-pub use swampyer_derive::Wamp;
+use std::sync::Arc;
+
+use crate::errors::*;
+
+use std::mem;
 
 /*
  * Trait for allowing encode and decode
@@ -18,6 +21,13 @@ pub trait WampSerializable {
 }
 
 impl core::fmt::Debug for dyn WampSerializable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.debug_name())
+    }
+}
+
+
+impl core::fmt::Debug for dyn WampSerializable + Send + Sync {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self.debug_name())
     }
@@ -43,7 +53,7 @@ impl encode::Write for WampWrite {
 /*
  * Recursive data structure for WAMP calls
  */
-pub type WampHash = HashMap<String, WampData>;
+pub type WampHash = HashMap<String, Box<WampData>>;
 pub type WampArray = Vec<WampData>;
 
 #[derive(Debug, Clone)]
@@ -51,20 +61,44 @@ pub enum WampData {
     Float(f64),
     Int(i64),
     UInt(u64),
+    Bool(bool),
     Str(String),
     Array(Box<WampArray>, usize),
     Hash(Box<WampHash>, usize),
-    Serializable(Arc<dyn WampSerializable>),
+    Serializable(Arc<dyn WampSerializable + Send + Sync>),
     None,
 }
 
 impl <'a> WampData {
+    pub fn as_u64 (&self) -> Result<u64, WampError> {
+        match self {
+            WampData::UInt(v) => Ok(*v),
+            _ => Err(WampError::IncorrectElementType),
+        }
+    }
+
+    pub fn from_slice(data:Vec<u8>) -> Result<Box<WampData>, WampError> {
+        let mut decoder = Box::new(Decoder::new(&data));
+        let desered = Box::new(WampData::deserialize_with(&mut decoder));
+        Ok(desered)
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut wriex = WampWrite { buffer: vec![] };
+        let mut encoder = Encoder::new(&mut wriex);
+        self.serialize_with(&mut encoder);
+
+        wriex.buffer
+    }
+
     pub fn serialize_with(&self, encoder:&mut Encoder<&mut WampWrite>) {
         match self {
             WampData::Float(f) => { encoder.f64(*f); },
             WampData::Int(i) => { encoder.i64(*i); },
             WampData::UInt(u) => { encoder.u64(*u); },
+            WampData::Bool(b) => { encoder.bool(*b); },
             WampData::Str(s) => { encoder.str(s); },
+            // WampData::Str(s) => { encoder.bytes(s.as_bytes()); },
             WampData::Array(a, _) => {
                 encoder.begin_array();
                 for v in a.iter() {
@@ -87,10 +121,11 @@ impl <'a> WampData {
         };
     }
 
-    pub fn deserialize_with(decoder:&mut Decoder) -> Self {
+    pub fn deserialize_with(decoder:&mut Box<Decoder>) -> Self {
         match decoder.datatype() {
             Ok(dt) => {
                 match dt {
+                    Type::Bool => { WampData::Bool(decoder.bool().unwrap().into()) },
                     Type::U8 => { WampData::UInt(decoder.u8().unwrap().into()) },
                     Type::U16 => { WampData::UInt(decoder.u16().unwrap().into()) },
                     Type::U32 => { WampData::UInt(decoder.u32().unwrap().into()) },
@@ -127,67 +162,32 @@ impl <'a> WampData {
                     },
                     Type::ArrayIndef => {
                         let position = decoder.position();
-                        match decoder.array() {
-                            Ok(s) => {
-                                match s {
-                                    Some(v) => {
-                                        let mut ar = Box::new(WampArray::new());
-                                        for i in 0..v {
-                                            let ar_element = WampData::deserialize_with(decoder);
-                                            ar.push(ar_element);
-                                        }
-                                        WampData::Array(ar, position)
-                                    },
-                                    _ => {
-                                        let mut ar = Box::new(WampArray::new());
-                                        loop {
-                                            if decoder.datatype().unwrap() == Type::Break {
-                                                break;
-                                            };
-                                            let ar_element = WampData::deserialize_with(decoder);
-                                            ar.push(ar_element);
-                                        }
-                                        WampData::Array(ar, position)
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                WampData::None
-                            }
+                        let mut ar = Box::new(WampArray::new());
+                        decoder.array();
+                        loop {
+                            if decoder.datatype().unwrap() == Type::Break {
+                                break;
+                            };
+                            let w = WampData::deserialize_with(decoder);
+                            ar.push(w);
                         }
+                        WampData::Array(ar, position)
                     }
+
                     Type::MapIndef => {
                         let position = decoder.position();
-                        match decoder.map() {
-                            Ok(s) => {
-                                match s {
-                                    Some(v) => {
-                                        let mut hs = Box::new(WampHash::new());
-                                        for i in 0..v {
-                                            hs.insert(
-                                                decoder.str().unwrap().into(),
-                                                WampData::deserialize_with(decoder)
-                                            );
-                                        }
-                                        WampData::Hash(hs, position)
-                                    }
-                                    _ => {
-                                        let mut hs = Box::new(WampHash::new());
-                                        loop {
-                                            if decoder.datatype().unwrap() == Type::Break {
-                                                break;
-                                            };
-                                            hs.insert(
-                                                decoder.str().unwrap().into(),
-                                                WampData::deserialize_with(decoder)
-                                            );
-                                        }
-                                        WampData::Hash(hs, position)
-                                    }
-                                }
-                            }
-                            _ => WampData::None
+                        let mut hs = Box::new(WampHash::new());
+                        decoder.map();
+                        loop {
+                            if decoder.datatype().unwrap() == Type::Break {
+                                break;
+                            };
+                            hs.insert(
+                                decoder.str().unwrap().into(),
+                                Box::new(WampData::deserialize_with(decoder))
+                            );
                         }
+                        WampData::Hash(hs, position)
                     },
 
                     Type::Map => {
@@ -200,7 +200,7 @@ impl <'a> WampData {
                                         for i in 0..v {
                                             hs.insert(
                                                 decoder.str().unwrap().into(),
-                                                WampData::deserialize_with(decoder)
+                                                Box::new(WampData::deserialize_with(decoder))
                                             );
                                         }
                                         WampData::Hash(hs, position)
@@ -223,30 +223,30 @@ impl <'a> WampData {
         }
     }
 
-    pub fn h(&self, i:&str) -> Result<&WampData, ()> {
+    pub fn h(&self, i:&str) -> Result<&WampData, WampError> {
         match self {
             WampData::Hash(h, _) => Ok(&h[i]),
-            _ => Err(()),
+            _ => Err(WampError::InvalidField),
         }
     }
 
-    pub fn a(&self, i:usize) -> Result<&WampData, ()> {
+    pub fn a(&self, i:usize) -> Result<&WampData, WampError> {
         match self {
             WampData::Array(a, _) => Ok(&a[i]),
-            _ => Err(()),
+            _ => Err(WampError::NotArray),
         }
     }
 
-    pub fn decode_with<T:minicbor::Decode<'a, ()>>(&self, decoder:&mut Decoder<'a>) -> Result<T, ()> {
+    pub fn decode_with<T:minicbor::Decode<'a, ()>>(&self, decoder:&mut Decoder<'a>) -> Result<T, WampError> {
         match self {
             WampData::Array(_, offset) => {
                 decoder.set_position(*offset);
                 match decoder.decode() {
                     Ok(v) => Ok(v),
-                    Err(t) => Err(())
+                    Err(t) => Err(WampError::InvalidField),
                 }
             },
-            _ => Err(()),
+            _ => Err(WampError::InvalidField),
         }
     }
 }
@@ -280,6 +280,30 @@ impl From<i32> for WampData {
     }
 }
 
+impl From<u16> for WampData {
+    fn from(i:u16) -> Self {
+        WampData::UInt(i.into())
+    }
+}
+
+impl From<i16> for WampData {
+    fn from(i:i16) -> Self {
+        WampData::Int(i.into())
+    }
+}
+
+impl From<u8> for WampData {
+    fn from(i:u8) -> Self {
+        WampData::UInt(i.into())
+    }
+}
+
+impl From<i8> for WampData {
+    fn from(i:i8) -> Self {
+        WampData::Int(i.into())
+    }
+}
+
 impl From<f32> for WampData {
     fn from(i:f32) -> Self {
         WampData::Float(i.into())
@@ -292,51 +316,83 @@ impl From<f64> for WampData {
     }
 }
 
+impl From<bool> for WampData {
+    fn from(i:bool) -> Self {
+        WampData::Bool(i.into())
+    }
+}
+
 impl From<&str> for WampData {
     fn from(i:&str) -> Self {
         WampData::Str(i.into())
     }
 }
 
+impl From<String> for WampData {
+    fn from(i:String) -> Self {
+        WampData::Str(i.into())
+    }
+}
+
 #[macro_export]
-macro_rules! wamp {
+macro_rules! wdata {
 
     // ARRAY
+    ( [] ) => {
+        {
+        let array = Box::new(WampArray::new());
+        WampData::Array(array, 0)
+        }
+    };
+
     ( [  $( $v:tt ),* ] ) => {
-        WampData::Array(Box::new([
-            $(
-                wamp!($v),
-            )*
-        ].into()), 0)
+        {
+        let mut array = Box::new(WampArray::with_capacity(10));
+        $(
+            let data = wdata!($v);
+            array.push(data);
+        )*
+        WampData::Array(array, 0)
+        }
     };
 
     ( [  $( $v:tt ),* , ] ) => {
-        WampData::Array(Box::new([
-            $(
-                wamp!($v),
-            )*
-        ].into()), 0)
+        {
+        let mut array = Box::new(WampArray::new());
+        $(
+            array.push(wdata!($v));
+        )*
+        WampData::Array(array, 0)
+        }
     };
 
     // DICT
     ( { $( $k:tt: $v:tt ),* , } ) => {
-        WampData::Hash(Box::new(
-            [
-                $(
-                    ( wamp!(@dict_key $k), wamp!($v) ),
-                )*
-            ].iter().cloned().collect()
-        ), 0)
+        {
+        let mut hash = Box::new(WampHash::new());
+        $(
+            let hash_key = wdata!(@dict_key $k);
+            hash.insert(
+                hash_key,
+                Box::new(wdata!($v))
+            );
+        )*
+        WampData::Hash(hash, 0)
+        }
     };
 
     ( { $( $k:tt: $v:tt ),* } ) => {
-        WampData::Hash(Box::new(
-            [
-                $(
-                    ( wamp!(@dict_key $k), wamp!($v) ),
-                )*
-            ].iter().cloned().collect()
-        ), 0)
+        {
+        let hash = Box::new(WampHash::new());
+        $(
+            let hash_key = wdata!(@dict_key $k);
+            hash.insert(
+                hash_key,
+                Box::new(wdata!($v))
+            );
+        )*
+        WampData::Hash(hash, 0)
+        }
     };
 
     // DICT KEY
@@ -344,9 +400,7 @@ macro_rules! wamp {
         $x.into()
     };
 
-    ( $x:expr ) => {
-        $x.into()
-    };
+    ( $x:expr ) => { $x.into() };
 
     () => {};
 }
