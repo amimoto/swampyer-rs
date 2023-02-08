@@ -37,23 +37,33 @@ impl Transport {
 
         // println!("Queueing data: {:?}", message_length_buf.to_vec());
         self.stream.write(&message_length_buf.to_vec()).await;
-        // println!("Queueing {} bytes of data: {:?}", message_length, buf);
+        println!("Queueing {} bytes of data: {:?}", message_length, buf);
         self.stream.write(&buf).await;
     }
 
     pub async fn message_get(&mut self) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; 4096];
 
-        let read_bytes = self.stream.read(&mut buf).await;
+        let read_bytes_result = self.stream.read(&mut buf).await;
 
-        // FIXME: need to keep collecting data or dealing with chunked
-        // data or a burst with multiple packets at the same time?
-        if buf.len() < 4 {
+        if let Err(err) = read_bytes_result {
+            println!("ERROR!: {:?}", err);
             return None;
         }
 
+        let read_bytes = read_bytes_result.unwrap();
+        println!("GOT chars: {}", read_bytes);
+
+        // FIXME: need to keep collecting data or dealing with chunked
+        // data or a burst with multiple packets at the same time?
+        if read_bytes < 4 {
+            return None;
+        }
+
+        //FIXME: read_bytes should be 
+
         Some(
-            buf[4..read_bytes.unwrap()].to_vec()
+            buf[4..read_bytes].to_vec()
         )
     }
 

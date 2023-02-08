@@ -18,7 +18,6 @@ bytes = "1.2.1"
 minicbor = "0.18.0"
 minicbor-derive = "0.12.0"
 
-
 # For debugging
 cap = "0.1.1"
 

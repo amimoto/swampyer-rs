@@ -25,6 +25,7 @@ const WAMP_HELLO:u64 = 1;
 const WAMP_WELCOME:u64 = 2;
 const WAMP_CHALLENGE:u64 = 4;
 const WAMP_AUTHENTICATE:u64 = 5;
+const WAMP_ERROR:u64 = 8;
 const WAMP_PUBLISH:u64 = 16;
 const WAMP_PUBLISHED:u64 = 17;
 const WAMP_SUBSCRIBE:u64 = 32;
@@ -49,7 +50,7 @@ struct Tracker {
     #[builder(default = "None")]
     onjoin: Option<JoinFn>,
 
-    #[builder(default = "0")]
+    #[builder(default = "1032354")]
     message_index: u64,
 
     #[builder(default = "HashMap::new()")]
@@ -113,12 +114,23 @@ impl WampClient {
 
     pub async fn submit_response(&self, message:Box<WampData>) -> Result<(), WampError> {
         let request_id = message.a(1)?.as_u64()?;
+        match self.tracker.lock().await.requests_pending.remove(&request_id) {
+            Some(sender) => {
+                sender.send(message).await;
+                Ok(())
+            },
+            None => { Err(WampError::UnknownRequestID) }
+        }
+    }
+
+    pub async fn submit_error(&self, message:Box<WampData>) -> Result<(), WampError> {
+        let request_id = message.a(2)?.as_u64()?;
+        println!("Returning error to request_id> {}", request_id);
         match self.tracker.lock().await.requests_pending.get(&request_id) {
             Some(sender) => {
                 sender.send(message).await;
                 Ok(())
             },
-
             None => { Err(WampError::UnknownRequestID) }
         }
     }
@@ -167,20 +179,16 @@ impl WampClient {
                 println!("result!");
                 self.submit_response(message).await;
             },
+            WAMP_ERROR => {
+                println!("ERROR!");
+                self.submit_error(message).await;
+            },
             _ => {
-                println!("random");
+                println!("random MESSAGE TYPE: {:?}", message_type);
+                println!("random MESSAGE {:?}", message);
             },
         };
         println!("<<< Leaving process");
-    }
-
-
-    pub async fn message_get(&mut self) -> Option<Box<WampData>> {
-        if let Some(buf) = self.transport.message_get().await {
-            let message = WampData::from_slice(buf).unwrap();
-            return Some(message);
-        }
-        None
     }
 
     pub async fn connect(url:&str, realm:&str, username:&str, password:&str) -> WampClient {
@@ -201,7 +209,10 @@ impl WampClient {
             info: Arc::new(info),
             transport,
             tracker: Arc::new(Mutex::new(tracker)),
-            thread_stack_size: 118192,
+            //thread_stack_size: 65535,
+            //thread_stack_size: 35535,
+            //thread_stack_size: 20000,
+            thread_stack_size: 8000,
         };
 
         wamp.authenticate().await;
@@ -210,7 +221,6 @@ impl WampClient {
     }
 
     fn loop_process_messages(&mut self, receiver:&Receiver<Vec<u8>>) {
-        println!("message occupies {} bytes on the stack", mem::size_of_val(&receiver));
         smol::block_on(async move {
             loop {
                 match receiver.try_recv() {
@@ -219,7 +229,7 @@ impl WampClient {
                         self.message_process(message).await;
                     },
                     Err(e) => {
-                        smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                        smol::Timer::after(std::time::Duration::from_millis(100)).await;
                         smol::future::yield_now().await;
                     },
                 };
@@ -231,8 +241,11 @@ impl WampClient {
     fn loop_incoming_dispatch(&mut self, sender:&Sender<Vec<u8>>) {
         smol::block_on(async move {
             loop {
-                match self.message_get().await {
-                    None => { println!("Things exploded." ) },
+                match self.transport.message_get().await {
+                    None => {
+                        println!("Things exploded." );
+                        smol::Timer::after(std::time::Duration::from_millis(100)).await;
+                    },
                     Some(message) => {
                         sender.try_send(message.to_vec());
                     }
@@ -268,7 +281,7 @@ impl WampClient {
         // Permablock for now
         smol::block_on(async move {
             loop {
-                smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                smol::Timer::after(std::time::Duration::from_millis(10)).await;
             }
         });
 
@@ -280,47 +293,31 @@ impl WampClient {
         });
     }
 
-    pub async fn call(&mut self, uri:&str, args:WampData, kwargs:WampData ) {
+    pub async fn call(&mut self, uri:&str, args:WampData, kwargs:WampData ) -> Box<WampData> {
+        let ( request_id, receiver ) = self.request_response().await;
         let message:WampData = wdata!([
                                     WAMP_CALL,
-                                    123, // request id
+                                    request_id, // request id
                                     {}, // options
                                     uri, // procedure
-                                    args,
-                                    kwargs
+                                    // args,
+                                    // kwargs
                                 ]);
+
         println!("Message: {:?}", message);
         self.message_send(message).await;
-    }
-}
 
-struct Call {
-    uri: String,
-    args: WampData,
-    kwargs: WampData,
-    options: WampData,
-}
-
-impl Call {
-    fn new (uri: &str) -> Call {
-        Call {
-            uri: uri.into(),
-            args: wdata!([]),
-            kwargs: wdata!({}),
-            options: wdata!({}),
+        loop {
+            match receiver.try_recv() {
+                Ok(t) => {
+                    return t
+                },
+                Err(e) => {
+                    smol::Timer::after(std::time::Duration::from_millis(100)).await;
+                    smol::future::yield_now().await;
+                },
+            };
         }
-    }
-
-    fn uri(uri: &str) -> Call {
-        Call {
-            uri: uri.into(),
-            args: wdata!([]),
-            kwargs: wdata!({}),
-            options: wdata!({}),
-        }
-    }
-
-    fn with(&self, wamp: &WampClient) {
     }
 }
 

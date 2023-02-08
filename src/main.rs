@@ -1,10 +1,10 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use smol::{Executor};
 
 pub mod secrets;
 
-use swampyer::{WampClient, WampData, wdata, WampArray, WampHash, ALLOCATOR};
+use swampyer::{WampClient, WampData, wdata, WampArray, WampHash};
 // use swampyer::{wdata, WampData};
 
 fn onjoin (wamp: &mut WampClient, message:Box<WampData>) {
@@ -16,8 +16,6 @@ fn onjoin (wamp: &mut WampClient, message:Box<WampData>) {
 }
 
 fn main() {
-    ALLOCATOR.set_limit(30 * 1024 * 1024).unwrap();
-
     println!("Connecting to {}", secrets::URL);
     smol::block_on(async {
         let mut client = WampClient::connect(
